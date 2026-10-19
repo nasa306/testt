@@ -84,47 +84,120 @@ n&&(f[n]=E);window.__eaglercraftXLoaderContextPre={rootElement:d,eaglercraftXOpt
 <script type="text/javascript">
 "use strict";
 (function(){
+	var PREFIX = "data:application/octet-stream;base64,";
+	var PART_COUNT = 5;
 	var launchInterval = -1;
 	var launchCounter = 1;
-	var launchCountdownNumberElement = null;
-	var launchCountdownProgressElement = null;
-	var launchSkipCountdown = false;
+	var launchSkip = false;
+	var launched = false;
+	var partsLoaded = false;
+	var numEl, progEl, skipBtn, statusEl, pickerEl;
 
-	// start loading and stitching the parts right away, while the countdown runs
-	var partsReady = Promise.all([1, 2, 3, 4, 5].map(function(i) {
-		return fetch("part" + i + ".txt").then(function(r) {
-			if(!r.ok) throw new Error("part" + i + ".txt: HTTP " + r.status);
-			return r.text();
-		});
-	})).then(function(parts) {
-		window.eaglercraftXOpts.assetsURI = parts.map(function(s) { return s.trim(); }).join("");
-	});
+	function setStatus(msg, isError) {
+		statusEl.innerText = msg;
+		statusEl.style.color = isError ? "#AA0000" : "#333333";
+	}
 
-	var launchTick = function() {
-		launchCountdownNumberElement.innerText = "" + Math.floor(6.0 - launchCounter * 0.06);
-		launchCountdownProgressElement.style.width = "" + launchCounter + "%";
-		if(++launchCounter > 100 || launchSkipCountdown) {
-			clearInterval(launchInterval);
-			setTimeout(async function() {
-				try {
-					await partsReady;
-				} catch(e) {
-					alert("Failed to load asset parts: " + e.message);
-					return;
-				}
-				document.body.removeChild(document.getElementById("launch_countdown_screen"));
-				document.body.style.backgroundColor = "black";
-				main();
-			}, 50);
-		}
-	};
+	// strips BOMs/whitespace, then sanity-checks the result before accepting it
+	function assemble(texts) {
+		if(texts.length !== PART_COUNT) throw new Error("Expected " + PART_COUNT + " parts but got " + texts.length);
+		var data = texts.map(function(s) {
+			return s.replace(/^\uFEFF/, "").replace(/\s+/g, "");
+		}).join("");
+		if(!data.startsWith(PREFIX)) throw new Error("Data doesn't start with '" + PREFIX + "'. Parts are out of order, or part1 is wrong.");
+		var b64 = data.substring(PREFIX.length);
+		if(b64.length < 1000) throw new Error("Data is suspiciously small (" + b64.length + " chars). A part may be empty.");
+		if(b64.length % 4 !== 0) throw new Error("Base64 length isn't a multiple of 4. A part is truncated, missing, or has extra characters.");
+		if(!/^[A-Za-z0-9+\/_-]+={0,2}$/.test(b64)) throw new Error("Data contains characters that aren't valid base64.");
+		window.eaglercraftXOpts.assetsURI = data;
+		partsLoaded = true;
+		pickerEl.style.display = "none";
+		skipBtn.disabled = false;
+		setStatus("Assets ready (" + (data.length / 1048576).toFixed(1) + " MB).", false);
+	}
+
+	function fail(msg) {
+		clearInterval(launchInterval);
+		launchInterval = -1;
+		skipBtn.disabled = true;
+		setStatus("Error: " + msg, true);
+		pickerEl.style.display = "block";
+	}
+
+	function startCountdown() {
+		if(launchInterval === -1) launchInterval = setInterval(tick, 50);
+	}
+
+	function launch() {
+		if(launched || !partsLoaded) return;
+		launched = true;
+		clearInterval(launchInterval);
+		setTimeout(function() {
+			document.body.removeChild(document.getElementById("launch_countdown_screen"));
+			document.body.style.backgroundColor = "black";
+			main();
+		}, 50);
+	}
+
+	function tick() {
+		if(launched) return;
+		if(launchCounter < 100) ++launchCounter;
+		numEl.innerText = "" + Math.max(0, Math.floor(6.0 - launchCounter * 0.06));
+		progEl.style.width = launchCounter + "%";
+		if(!partsLoaded && launchCounter >= 100) setStatus("Countdown done, still loading files...", false);
+		// only ever launches once the assets are verified
+		if(partsLoaded && (launchCounter >= 100 || launchSkip)) launch();
+	}
+
+	function loadViaFetch() {
+		setStatus("Loading part files...", false);
+		return Promise.all(Array.from({length: PART_COUNT}, function(_, i) {
+			var name = "part" + (i + 1) + ".txt";
+			return fetch(name, {cache: "no-store"}).then(function(r) {
+				if(!r.ok) throw new Error(name + " returned HTTP " + r.status);
+				return r.text();
+			});
+		})).then(assemble);
+	}
 
 	window.addEventListener("load", function() {
-		launchCountdownNumberElement = document.getElementById("launchCountdownNumber");
-		launchCountdownProgressElement = document.getElementById("launchCountdownProgress");
-		launchInterval = setInterval(launchTick, 50);
-		document.getElementById("skipCountdown").addEventListener("click", function() {
-			launchSkipCountdown = true;
+		numEl = document.getElementById("launchCountdownNumber");
+		progEl = document.getElementById("launchCountdownProgress");
+		skipBtn = document.getElementById("skipCountdown");
+
+		// disabled until the assets are loaded and verified
+		skipBtn.disabled = true;
+		skipBtn.addEventListener("click", function() { if(partsLoaded) launchSkip = true; });
+
+		var box = document.querySelector("#launch_countdown_screen > div");
+		statusEl = document.createElement("p");
+		statusEl.style.fontSize = "14px";
+		box.appendChild(statusEl);
+
+		// manual fallback, hidden unless fetching fails (e.g. opened via file://)
+		pickerEl = document.createElement("div");
+		pickerEl.style.display = "none";
+		pickerEl.innerHTML = "<p>Select all " + PART_COUNT + " part files (part1.txt to part" + PART_COUNT + ".txt):</p>";
+		var input = document.createElement("input");
+		input.type = "file";
+		input.multiple = true;
+		input.accept = ".txt";
+		input.addEventListener("change", function() {
+			var files = Array.from(input.files);
+			if(files.length !== PART_COUNT) { setStatus("Error: select exactly " + PART_COUNT + " files (you picked " + files.length + ").", true); return; }
+			files.sort(function(a, b) { return a.name.localeCompare(b.name, undefined, {numeric: true}); });
+			setStatus("Reading files: " + files.map(function(f) { return f.name; }).join(", "), false);
+			Promise.all(files.map(function(f) { return f.text(); })).then(function(texts) {
+				assemble(texts);
+				startCountdown();
+			}).catch(function(e) { fail(e.message); });
+		});
+		pickerEl.appendChild(input);
+		box.appendChild(pickerEl);
+
+		startCountdown();
+		loadViaFetch().catch(function(e) {
+			fail(e.message + " (browsers block fetch on local files, so use the picker below or run a local server)");
 		});
 	});
 })();
